@@ -12,9 +12,7 @@ The file is the class-search listing (subject, number, title, instructors, meeti
 
 ## GitHub Action
 
-**Update course data** runs when someone starts it from the Actions tab and enters a SIS term. The job runs `fetch_page.py` and commits `data/<term>.json` only if the file changed.
-
-The every-two-hours schedule in `.github/workflows/update-data.yml` stays commented out.
+**Update course data** runs on the schedule in `.github/workflows/update-data.yml`, and when someone starts it from the Actions tab. The cron line runs once a day at 07:30 UTC. Edit that line to change the time. A scheduled run uses term `1268` until that default is edited. The job commits `data/<term>.json` only if the file changed.
 
 ## What the website does with this file
 

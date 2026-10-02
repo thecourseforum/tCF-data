@@ -7,9 +7,9 @@ on:
         description: "SIS term code (for example 1268)"
         required: true
         type: string
-  # The every-two-hours schedule stays off. Start this workflow by hand from Actions.
-  # schedule:
-  #   - cron: "0 */2 * * *"
+  # Edit this cron to change the time. This runs once a day at 07:30 UTC.
+  schedule:
+    - cron: "30 7 * * *"
 
 permissions:
   contents: write
@@ -26,12 +26,13 @@ jobs:
 
       - name: Fetch the SIS term
         env:
-          TERM: ${{ inputs.term }}
+          # Scheduled runs have no input. Change 1268 for another term.
+          TERM: ${{ inputs.term || '1268' }}
         run: python fetch_page.py "$TERM"
 
       - name: Commit if the snapshot changed
         env:
-          TERM: ${{ inputs.term }}
+          TERM: ${{ inputs.term || '1268' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
