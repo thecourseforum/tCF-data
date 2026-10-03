@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       term:
-        description: "SIS term code (for example 1268)"
-        required: true
+        description: "SIS term code. Leave blank to use today's date."
+        required: false
         type: string
   # Edit this cron to change the time. This runs once a day at 07:30 UTC.
   schedule:
@@ -25,14 +25,19 @@ jobs:
           python-version: "3.12"
 
       - name: Fetch the SIS term
+        id: fetch
         env:
-          # Scheduled runs have no input. Change 1268 for another term.
-          TERM: ${{ inputs.term || '1268' }}
-        run: python fetch_page.py "$TERM"
+          TERM: ${{ inputs.term }}
+        run: |
+          if [ -n "$TERM" ]; then
+            python fetch_page.py "$TERM"
+          else
+            python fetch_page.py
+          fi
 
       - name: Commit if the snapshot changed
         env:
-          TERM: ${{ inputs.term || '1268' }}
+          TERM: ${{ steps.fetch.outputs.term }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
