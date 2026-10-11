@@ -6,6 +6,7 @@ With no argument, the term comes from today's date.
 
 import csv
 import http.cookiejar
+import io
 import json
 import os
 import sys
@@ -192,17 +193,98 @@ def class_row(course):
     return row
 
 
+# SIS class search does not return these. A later fill-in must survive the next fetch.
+_KEEP_IF_BLANK = ("Description", "Disciplines", "Cost")
+
+
+def _csv_line(row):
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=COLUMNS, lineterminator="\n")
+    writer.writerow({column: "" if row.get(column) is None else row[column] for column in COLUMNS})
+    return buffer.getvalue()
+
+
+def _record_spans(text):
+    """Byte spans of each CSV record, including its newline. Quotes can hold commas."""
+    spans = []
+    start = 0
+    in_quotes = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            if in_quotes and index + 1 < len(text) and text[index + 1] == '"':
+                index += 2
+                continue
+            in_quotes = not in_quotes
+        elif char == "\n" and not in_quotes:
+            spans.append((start, index + 1))
+            start = index + 1
+        index += 1
+    if start < len(text):
+        spans.append((start, len(text)))
+    return spans
+
+
+def _lines_by_class(text):
+    """ClassNumber to the exact line already stored, so an unchanged row is not rewritten."""
+    lines = {}
+    for start, end in _record_spans(text):
+        record = text[start:end]
+        parsed = next(csv.reader(io.StringIO(record, newline="")))
+        if not parsed or parsed[0] == "ClassNumber":
+            continue
+        lines[parsed[0]] = record if record.endswith("\n") else record + "\n"
+    return lines
+
+
+def render_snapshot(classes, previous_text):
+    """CSV text for one term. Unchanged class lines are copied from previous_text."""
+    previous_rows = {}
+    previous_lines = {}
+    if previous_text:
+        previous_lines = _lines_by_class(previous_text)
+        previous_rows = {
+            row["ClassNumber"]: row
+            for row in csv.DictReader(io.StringIO(previous_text, newline=""))
+        }
+    parts = [",".join(COLUMNS) + "\n"]
+    ordered = sorted(classes, key=lambda course: course.get("class_nbr") or 0)
+    for course in ordered:
+        row = class_row(course)
+        key = str(row["ClassNumber"])
+        old = previous_rows.get(key)
+        if old:
+            for column in _KEEP_IF_BLANK:
+                if row[column] in ("", None) and old.get(column):
+                    row[column] = old[column]
+        line = _csv_line(row)
+        parts.append(previous_lines[key] if previous_lines.get(key) == line else line)
+    return "".join(parts)
+
+
+def changed_class_count(previous_text, text):
+    old = _lines_by_class(previous_text) if previous_text else {}
+    new = _lines_by_class(text)
+    keys = set(old) | set(new)
+    return sum(1 for key in keys if old.get(key) != new.get(key))
+
+
 def write_csv(term, classes):
-    """Write data/<year>_<season>.csv."""
+    """Update data/<year>_<season>.csv. Skip the write when every class line matches."""
     semester = semester_for_term(term)
     os.makedirs("data", exist_ok=True)
     path = f"data/{semester}.csv"
-    ordered = sorted(classes, key=lambda course: course.get("class_nbr") or 0)
-    with open(path, "w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=COLUMNS, lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(class_row(course) for course in ordered)
-    return path, semester
+    previous = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8", newline="") as handle:
+            previous = handle.read()
+    text = render_snapshot(classes, previous)
+    changed = changed_class_count(previous, text)
+    if text != previous:
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+    return path, semester, changed
 
 
 def _check():
@@ -214,39 +296,47 @@ def _check():
     assert term_for_date(date(2028, 1, 10)) == "1281"
     assert term_for_date(date(2028, 6, 1)) == "1286"
     assert semester_for_term("1268") == "2026_fall"
-    row = class_row(
-        {
-            "class_nbr": 10467,
-            "subject": "AAS",
-            "catalog_nbr": "1010",
-            "class_section": "100",
-            "section_type": "Lecture",
-            "units": "4",
-            "descr": "Introduction to African-American and African Studies I",
-            "topic": "",
-            "enrl_stat_descr": "Open",
-            "enrollment_total": 157,
-            "class_capacity": 180,
-            "wait_tot": 1,
-            "wait_cap": 199,
-            "instructors": [{"name": "Kevin Gaines"}],
-            "meetings": [
-                {
-                    "days": "TuTh",
-                    "start_time": "12.30.00.000000",
-                    "end_time": "13.45.00.000000",
-                    "room": "***",
-                    "start_dt": "08/25/2026",
-                    "end_dt": "12/08/2026",
-                }
-            ],
-        }
-    )
+    course = {
+        "class_nbr": 10467,
+        "subject": "AAS",
+        "catalog_nbr": "1010",
+        "class_section": "100",
+        "section_type": "Lecture",
+        "units": "4",
+        "descr": "Introduction to African-American and African Studies I",
+        "topic": "",
+        "enrl_stat_descr": "Open",
+        "enrollment_total": 157,
+        "class_capacity": 180,
+        "wait_tot": 1,
+        "wait_cap": 199,
+        "instructors": [{"name": "Kevin Gaines"}],
+        "meetings": [
+            {
+                "days": "TuTh",
+                "start_time": "12.30.00.000000",
+                "end_time": "13.45.00.000000",
+                "room": "***",
+                "start_dt": "08/25/2026",
+                "end_dt": "12/08/2026",
+            }
+        ],
+    }
+    row = class_row(course)
     assert row["Days1"] == "TuTh 12:30pm - 1:45pm"
     assert row["MeetingDates1"] == "08/25/2026 - 12/08/2026"
     assert row["Description"] == ""
     assert row["Disciplines"] == ""
     assert row["Cost"] == ""
+    other = dict(course, class_nbr=10468, class_section="101", enrollment_total=10)
+    stored = render_snapshot([course, other], "")
+    assert render_snapshot([course, other], stored) == stored
+    enriched = stored.replace(",,,\n", ",Kept description,Kept discipline,\n", 1)
+    bumped = dict(course, enrollment_total=158)
+    kept = render_snapshot([bumped, other], enriched)
+    assert "Kept description" in _lines_by_class(kept)["10467"]
+    assert _lines_by_class(kept)["10468"] == _lines_by_class(stored)["10468"]
+    assert changed_class_count(stored, kept) == 1
     print("ok")
 
 
@@ -292,8 +382,11 @@ def main(argv):
         raise SystemExit("usage: python fetch_page.py [sis-term]")
     classes, page_count = fetch_pages(term)
     # Write only after every page succeeds, so a failed run cannot replace the file.
-    path, semester = write_csv(term, classes)
-    print(f"wrote {path} ({len(classes)} classes, {page_count} pages)")
+    path, semester, changed = write_csv(term, classes)
+    if changed:
+        print(f"updated {changed} classes in {path} ({len(classes)} classes, {page_count} pages)")
+    else:
+        print(f"{path} already matches ({len(classes)} classes, {page_count} pages)")
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a", encoding="utf-8") as handle:
