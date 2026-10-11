@@ -2659,8 +2659,8 @@
       "end_dt": "12/04/2026",
       "enrl_stat": "O",
       "enrl_stat_descr": "Open",
-      "enrollment_available": 20,
-      "enrollment_total": 4,
+      "enrollment_available": 18,
+      "enrollment_total": 6,
       "grading_basis": "Graded",
       "icons": [],
       "index": 37,
@@ -21951,10 +21951,10 @@
       "crse_offer_nbr": 1,
       "descr": "Probability",
       "end_dt": "12/08/2026",
-      "enrl_stat": "C",
-      "enrl_stat_descr": "Closed",
-      "enrollment_available": 0,
-      "enrollment_total": 40,
+      "enrl_stat": "O",
+      "enrl_stat_descr": "Open",
+      "enrollment_available": 2,
+      "enrollment_total": 38,
       "grading_basis": "Graded",
       "icons": [],
       "index": 296,
@@ -160466,7 +160466,7 @@
       "enrl_stat": "C",
       "enrl_stat_descr": "Closed",
       "enrollment_available": 0,
-      "enrollment_total": 17,
+      "enrollment_total": 16,
       "grading_basis": "Graded",
       "icons": [],
       "index": 2234,
@@ -172159,7 +172159,7 @@
       "reserved_combined_info": {
         "class_enrl_cap": 0,
         "combined_enrl_cap": 94,
-        "enrl_tot_other_combined": 43
+        "enrl_tot_other_combined": 42
       },
       "rqmnt_designtn": "",
       "schedule_print": "Y",
@@ -216530,7 +216530,7 @@
       "reserved_combined_info": {
         "class_enrl_cap": 0,
         "combined_enrl_cap": 94,
-        "enrl_tot_other_combined": 48
+        "enrl_tot_other_combined": 47
       },
       "rqmnt_designtn": "",
       "schedule_print": "Y",
@@ -220001,7 +220001,7 @@
       "reserved_combined_info": {
         "class_enrl_cap": 0,
         "combined_enrl_cap": 94,
-        "enrl_tot_other_combined": 58
+        "enrl_tot_other_combined": 57
       },
       "rqmnt_designtn": "",
       "schedule_print": "Y",
@@ -690384,7 +690384,7 @@
       "reserved_combined_info": {
         "class_enrl_cap": 27,
         "combined_enrl_cap": 35,
-        "enrl_tot_other_combined": 8
+        "enrl_tot_other_combined": 7
       },
       "rqmnt_designtn": "",
       "schedule_print": "Y",
@@ -692858,10 +692858,10 @@
       "crse_offer_nbr": 1,
       "descr": "Selected Topics in Systems Engineering",
       "end_dt": "12/08/2026",
-      "enrl_stat": "C",
-      "enrl_stat_descr": "Closed",
-      "enrollment_available": 0,
-      "enrollment_total": 8,
+      "enrl_stat": "O",
+      "enrl_stat_descr": "Open",
+      "enrollment_available": 1,
+      "enrollment_total": 7,
       "grading_basis": "Graded",
       "icons": [],
       "index": 9560,
