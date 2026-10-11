@@ -4,16 +4,22 @@ This is the listing SIS returns for the term, not the per-class detail page.
 With no argument, the term comes from today's date.
 """
 
+import copy
 import csv
 import http.cookiejar
 import io
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+
+# Lower this if SIS starts timing out.
+PAGE_WORKERS = 4
 
 # First day of courses, from https://registrar.virginia.edu/calendar/academic
 # through Spring 2030. Keep this tuple identical to current_semester in
@@ -337,7 +343,29 @@ def _check():
     assert "Kept description" in _lines_by_class(kept)["10467"]
     assert _lines_by_class(kept)["10468"] == _lines_by_class(stored)["10468"]
     assert changed_class_count(stored, kept) == 1
+    assert PAGE_WORKERS > 1
+    gathered = gather_pages(lambda page: {"classes": [{"class_nbr": page}]}, 5, PAGE_WORKERS)
+    assert [row["class_nbr"] for row in gathered] == [2, 3, 4, 5]
     print("ok")
+
+
+def gather_pages(fetch_one, page_count, workers):
+    """Classes from pages 2 through page_count, in page order."""
+    if page_count < 2:
+        return []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        payloads = pool.map(fetch_one, range(2, page_count + 1))
+        classes = []
+        for payload in payloads:
+            classes.extend(payload.get("classes") or [])
+    return classes
+
+
+def _opener_with_cookies(cookie_jar):
+    copied = http.cookiejar.CookieJar()
+    for cookie in cookie_jar:
+        copied.set_cookie(copy.copy(cookie))
+    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(copied))
 
 
 def fetch_pages(term):
@@ -350,23 +378,30 @@ def fetch_pages(term):
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
 
-    def fetch_page(page):
+    def fetch_with(page_opener, page):
         last_error = None
         for _ in range(3):
             try:
-                with opener.open(search + str(page), timeout=60) as response:
+                with page_opener.open(search + str(page), timeout=60) as response:
                     return json.load(response)
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
                 last_error = error
                 time.sleep(2)
         raise SystemExit(f"page {page} failed: {last_error}")
 
-    first = fetch_page(1)
+    first = fetch_with(opener, 1)
     page_count = int(first["pageCount"])
     classes = list(first.get("classes") or [])
-    for page in range(2, page_count + 1):
-        payload = fetch_page(page)
-        classes.extend(payload.get("classes") or [])
+    local = threading.local()
+
+    def fetch_later(page):
+        page_opener = getattr(local, "opener", None)
+        if page_opener is None:
+            page_opener = _opener_with_cookies(cookie_jar)
+            local.opener = page_opener
+        return fetch_with(page_opener, page)
+
+    classes.extend(gather_pages(fetch_later, page_count, PAGE_WORKERS))
     return classes, page_count
 
 
