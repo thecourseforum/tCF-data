@@ -29,6 +29,7 @@ jobs:
         env:
           TERM: ${{ inputs.term }}
         run: |
+          pip install requests
           if [ -n "$TERM" ]; then
             python fetch_page.py "$TERM"
           else
