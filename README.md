@@ -17,6 +17,10 @@ The file uses the same columns as `load_semester` (mnemonic, number, instructors
 
 **Update course data** runs on the schedule in `.github/workflows/update-data.yml`, and when someone starts it from the Actions tab. The cron line runs once a day at 07:30 UTC. Edit that line to change the time. A scheduled run fetches the term for today's date. A manual run can pass a different term. The job commits `data/<year>_<season>.csv` only if the file changed.
 
+The job runs on GitHub's `ubuntu-latest` machine. That machine exists only for the run: it checks out this repository, installs `requests` (the machine starts without it), runs `fetch_page.py`, and pushes the CSV when the file changed. The next day's run is a new machine, so the install happens again.
+
+Any computer that can run `python fetch_page.py` on a schedule and push `data/` can take that job. An AWS schedule, such as EventBridge starting a Lambda or a small ECS task, would do the same work. The website still only downloads the CSV.
+
 ## What the website does with this file
 
 `fetch_data` in theCourseForum2 downloads `data/<year>_<season>.csv` from this repository. It does not call SIS. `load_semester` can import that CSV. Catalog descriptions, discipline names, and course cost stay blank because this listing does not include them.
