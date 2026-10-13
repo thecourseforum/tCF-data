@@ -11,7 +11,15 @@ python fetch_page.py 1268
 
 With no argument, the term is whichever semester has started by today's date. Fall, January, and spring starts through Spring 2030 come from the [registrar academic calendar](https://registrar.virginia.edu/calendar/academic). Summers after 2027, and every season after Spring 2030, use January 2, January 15, May 18, and August 25. Pass a term to fetch a different one.
 
-The file uses the same columns as `load_semester` (mnemonic, number, instructors, meeting times, enrollment). It is the class-search listing, not the separate per-class description page, so Description, Disciplines, and Cost are blank. The script writes the file only after every page succeeds.
+The file uses the same columns as `load_semester` (mnemonic, number, instructors, meeting times, enrollment, description, disciplines, cost). The script writes the file only after every request succeeds.
+
+## Thomas's fetcher
+
+The extra fields come from the faster course fetcher in [theCourseForum2#1306](https://github.com/thecourseforum/theCourseForum2/pull/1306). `fetch_page.py` uses that retrieval and still writes `data/<year>_<season>.csv`.
+
+Class search supplies every section. Known attribute codes map to Disciplines and Cost here. ClassDetails runs only for an unknown code. Descriptions are fetched once per course: HoosList for the current or a future term, SIS catalog text for older terms, and SIS again if HoosList fails or returns non-text. An empty SIS description stays blank. Requests use a pooled session and retry up to five times. An empty, repeated, or inconsistent page stops the run.
+
+The registrar term dates stay as they were, including January. Meeting times stay `TuTh 12:30pm - 1:45pm`, which `load_semester` parses. Later class-search pages are still fetched in parallel. A blank description, discipline, or cost leaves the previous value in the file.
 
 ## GitHub Action
 
@@ -23,4 +31,4 @@ Any computer that can run `python fetch_page.py` on a schedule and push `data/` 
 
 ## What the website does with this file
 
-`fetch_data` in theCourseForum2 downloads `data/<year>_<season>.csv` from this repository. It does not call SIS. `load_semester` can import that CSV. Catalog descriptions, discipline names, and course cost stay blank because this listing does not include them.
+`fetch_data` in theCourseForum2 downloads `data/<year>_<season>.csv` from this repository. It does not call SIS. `load_semester` can import that CSV, including the description, discipline, and cost columns.
