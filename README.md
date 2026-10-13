@@ -13,7 +13,7 @@ With no argument, the term is whichever semester has started by today's date. Fa
 
 The file uses the same columns as `load_semester` (mnemonic, number, instructors, meeting times, enrollment, description, disciplines, cost). The script writes the file only after every request succeeds.
 
-## Thomas's fetcher
+## Optimized fetcher
 
 The extra fields come from the faster course fetcher in [theCourseForum2#1306](https://github.com/thecourseforum/theCourseForum2/pull/1306). `fetch_page.py` uses that retrieval and still writes `data/<year>_<season>.csv`.
 
