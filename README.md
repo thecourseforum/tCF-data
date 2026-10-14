@@ -11,7 +11,7 @@ python fetch_page.py 1268
 
 With no argument, the term is whichever semester has started by today's date. Fall, January, and spring starts through Spring 2030 come from the [registrar academic calendar](https://registrar.virginia.edu/calendar/academic). Summers after 2027, and every season after Spring 2030, use January 2, January 15, May 18, and August 25. Pass a term to fetch a different one.
 
-The file uses the same columns as `load_semester` (mnemonic, number, instructors, meeting times, enrollment, description, disciplines, cost). Known attribute codes fill Disciplines and Cost. An unknown code is read from ClassDetails, one section at a time. Descriptions are fetched once per course: HoosList for the current or a future term, and SIS when HoosList does not apply or fails. Class-search pages are requested one at a time. The script writes the file only after every request succeeds. A blank description, discipline, or cost leaves the previous value in the file.
+The file uses the same columns as `load_semester` (mnemonic, number, instructors, meeting times, enrollment, description, disciplines, cost). Known attribute codes fill Disciplines and Cost. An unknown code is read from ClassDetails, one section at a time. Descriptions are fetched once per course from SIS ClassDetails. Class-search pages are requested one at a time. The script writes the file only after every request succeeds. A blank description, discipline, or cost leaves the previous value in the file.
 
 ## GitHub Action
 

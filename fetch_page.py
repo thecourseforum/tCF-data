@@ -2,16 +2,14 @@
 
 Class search supplies sections, one page at a time. Known attribute codes map
 to Disciplines and Cost; ClassDetails is used only for an unknown code.
-Descriptions come from HoosList for the current or a future term, and from
-SIS otherwise. With no argument, the term comes from today's date.
+Descriptions come from SIS ClassDetails, one course at a time.
+With no argument, the term comes from today's date.
 """
 
 import csv
 import io
 import os
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
 import requests
@@ -24,8 +22,6 @@ SIS_BASE = (
     "https://sisuva.admin.virginia.edu/psc/ihprd/UVSS/SA/s/"
     "WEBLIB_HCX_CM.H_CLASS_SEARCH.FieldFormula."
 )
-HOOSLIST_URL = "https://hooslist.virginia.edu/ClassSchedule/_GetCourseDescription"
-
 # First day of courses, from https://registrar.virginia.edu/calendar/academic
 # through Spring 2030. Keep this tuple identical to current_semester in
 # theCourseForum2 tcf_website/utils.py. Summer 2026 and 2027 are the first
@@ -126,11 +122,6 @@ def term_for_date(today=None):
     """SIS term for a calendar date."""
     year, _, season = semester_for_date(today).partition("_")
     return f"1{int(year) % 100:02d}{_SEASON_DIGITS[season]}"
-
-
-def description_source(term, today=None):
-    """HoosList for this term and later ones. SIS has the older catalog text."""
-    return "sis" if int(term) < int(term_for_date(today)) else "hooslist"
 
 
 _SEASON_NAMES = {"1": "january", "2": "spring", "6": "summer", "8": "fall"}
@@ -411,8 +402,6 @@ def _check():
     assert "Kept description" in _lines_by_class(kept)["10467"]
     assert _lines_by_class(kept)["10468"] == _lines_by_class(stored)["10468"]
     assert changed_class_count(stored, kept) == 1
-    assert description_source("1262", date(2026, 10, 3)) == "sis"
-    assert description_source("1268", date(2026, 10, 3)) == "hooslist"
     described = dict(course, _description="A catalog description", _labels=["Historical Perspectives"])
     described_row = class_row(described)
     assert described_row["Description"] == "A catalog description"
@@ -479,38 +468,6 @@ def request_sis_json(session, endpoint, **params):
     return payload
 
 
-def _worker_sessions(source):
-    """One HoosList session per thread. SIS detail calls stay on the search session."""
-    local = threading.local()
-
-    def hoos():
-        session = getattr(local, "hoos", None)
-        if session is None:
-            session = create_session()
-            local.hoos = session
-        return session
-
-    return hoos
-
-
-def run_each(fn, items):
-    items = list(items)
-    if not items:
-        return []
-    results = [None] * len(items)
-    workers = min(32, (os.cpu_count() or 1) + 4)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(fn, item): index for index, item in enumerate(items)}
-        try:
-            for future in as_completed(futures):
-                results[futures[future]] = future.result()
-        except BaseException:
-            for future in futures:
-                future.cancel()
-            raise
-    return results
-
-
 def labels_from_details(data):
     text = data["section_info"]["enrollment_information"]["class_attributes"] or ""
     return [line.strip() for line in str(text).splitlines() if line.strip()]
@@ -552,25 +509,6 @@ def fetch_sis_description(session, course, term):
     return text if text and str(text).strip() else ""
 
 
-def fetch_hooslist_description(session, course):
-    response = session.get(
-        HOOSLIST_URL,
-        params={"subject": course["subject"], "courseNum": course["catalog_nbr"]},
-        timeout=TIMEOUT,
-    )
-    response.raise_for_status()
-    text = response.text
-    content_type = response.headers.get("Content-Type", "").lower()
-    if (
-        "text/plain" not in content_type
-        or not text.strip()
-        or "<html" in text.lower()
-        or "<!doctype" in text.lower()
-    ):
-        raise ValueError("HoosList returned an empty or non-text description.")
-    return text
-
-
 def course_key(term, course):
     return (
         term,
@@ -582,31 +520,12 @@ def course_key(term, course):
 
 
 def fill_descriptions(courses, session, term):
-    """HoosList in parallel. SIS catalog text, one ClassDetails call at a time."""
-    source = description_source(term)
+    """SIS catalog text, one ClassDetails call per course."""
     unique = {}
     for course in courses:
         unique.setdefault(course_key(term, course), course)
     found = {}
-    fallbacks = []
-    if source == "hooslist":
-        hoos = _worker_sessions(session)
-
-        def one(course):
-            try:
-                text = clean_description(fetch_hooslist_description(hoos(), course))
-            except (requests.RequestException, ValueError):
-                return course_key(term, course), None
-            return course_key(term, course), text
-
-        for key, text in run_each(one, unique.values()):
-            if text is None:
-                fallbacks.append(unique[key])
-            else:
-                found[key] = text
-    else:
-        fallbacks = list(unique.values())
-    for course in fallbacks:
+    for course in unique.values():
         found[course_key(term, course)] = clean_description(
             fetch_sis_description(session, course, term)
         )
