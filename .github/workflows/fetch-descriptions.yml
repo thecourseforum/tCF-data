@@ -1,0 +1,57 @@
+name: Fetch course descriptions
+
+on:
+  workflow_dispatch:
+    inputs:
+      term:
+        description: "SIS term code. Leave blank to use today's date."
+        required: false
+        type: string
+      refresh_all:
+        description: "Refetch every description. About once a year."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  descriptions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Fetch descriptions
+        id: fetch
+        env:
+          TERM: ${{ inputs.term }}
+          REFRESH_ALL: ${{ inputs.refresh_all }}
+        run: |
+          pip install requests
+          args=()
+          if [ "$REFRESH_ALL" = "true" ]; then
+            args+=(--all)
+          fi
+          if [ -n "$TERM" ]; then
+            args+=("$TERM")
+          fi
+          python fetch_descriptions.py "${args[@]}"
+
+      - name: Commit if the snapshot changed
+        env:
+          TERM: ${{ steps.fetch.outputs.term }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet --exit-code data/; then
+            echo "No changes."
+          else
+            git add data/
+            git commit -m "[Automated]: descriptions ${TERM}"
+            git push
+          fi

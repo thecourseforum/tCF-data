@@ -2,7 +2,7 @@
 
 Class search supplies sections, one page at a time. Known attribute codes map
 to Disciplines and Cost; ClassDetails is used only for an unknown code.
-Descriptions come from SIS ClassDetails, one course at a time.
+This script does not fetch descriptions. Use fetch_descriptions.py for that.
 With no argument, the term comes from today's date.
 """
 
@@ -492,47 +492,6 @@ def fill_attributes(courses, session, term):
         course["_labels"] = labels_from_details(data)
 
 
-def clean_description(text):
-    return (text or "").replace("\n", "").replace("\r", " ")
-
-
-def fetch_sis_description(session, course, term):
-    data = request_sis_json(
-        session,
-        "IScript_ClassDetails",
-        term=term,
-        class_nbr=course["class_nbr"],
-    )
-    section_info = data.get("section_info") or {}
-    catalog_descr = section_info.get("catalog_descr") or {}
-    text = catalog_descr.get("crse_catalog_description")
-    return text if text and str(text).strip() else ""
-
-
-def course_key(term, course):
-    return (
-        term,
-        course["subject"],
-        course["catalog_nbr"],
-        str(course["crse_id"]),
-        str(course["crse_offer_nbr"]),
-    )
-
-
-def fill_descriptions(courses, session, term):
-    """SIS catalog text, one ClassDetails call per course."""
-    unique = {}
-    for course in courses:
-        unique.setdefault(course_key(term, course), course)
-    found = {}
-    for course in unique.values():
-        found[course_key(term, course)] = clean_description(
-            fetch_sis_description(session, course, term)
-        )
-    for course in courses:
-        course["_description"] = found[course_key(term, course)]
-
-
 def _page_payload(session, term, page):
     payload = request_sis_json(session, "IScript_ClassSearch", term=term, page=page)
     if "pageCount" not in payload or "classes" not in payload:
@@ -566,7 +525,6 @@ def main(argv):
     if not classes:
         raise SystemExit("SIS returned no sections; existing file was kept.")
     fill_attributes(classes, session, term)
-    fill_descriptions(classes, session, term)
     # Write only after every request succeeds, so a failed run cannot replace the file.
     path, semester, changed = write_csv(term, classes)
     if changed:
