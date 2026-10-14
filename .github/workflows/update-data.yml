@@ -7,6 +7,11 @@ on:
         description: "SIS term code. Leave blank to use today's date."
         required: false
         type: string
+      descriptions:
+        description: "Refresh every catalog description. A blank result is not written."
+        required: false
+        type: boolean
+        default: false
   # Edit this cron to change the time. This runs once a day at 07:30 UTC.
   schedule:
     - cron: "30 7 * * *"
@@ -28,13 +33,17 @@ jobs:
         id: fetch
         env:
           TERM: ${{ inputs.term }}
+          DESCRIPTIONS: ${{ inputs.descriptions }}
         run: |
           pip install requests
-          if [ -n "$TERM" ]; then
-            python fetch_page.py "$TERM"
-          else
-            python fetch_page.py
+          args=()
+          if [ "$DESCRIPTIONS" = "true" ]; then
+            args+=(--descriptions)
           fi
+          if [ -n "$TERM" ]; then
+            args+=("$TERM")
+          fi
+          python fetch_page.py "${args[@]}"
 
       - name: Commit if the snapshot changed
         env:

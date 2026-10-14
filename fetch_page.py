@@ -2,7 +2,7 @@
 
 Class search supplies sections, one page at a time. Known attribute codes map
 to Disciplines and Cost; ClassDetails is used only for an unknown code.
-This script does not fetch descriptions. Use fetch_descriptions.py for that.
+Pass --descriptions to fill catalog text. Without that flag, stored descriptions are kept.
 With no argument, the term comes from today's date.
 """
 
@@ -402,6 +402,13 @@ def _check():
     assert "Kept description" in _lines_by_class(kept)["10467"]
     assert _lines_by_class(kept)["10468"] == _lines_by_class(stored)["10468"]
     assert changed_class_count(stored, kept) == 1
+    bare = dict(course)
+    assign_descriptions([bare], {("AAS", "1010"): ""})
+    assert not bare.get("_description")
+    kept_blank = render_snapshot([bare], enriched)
+    assert "Kept description" in kept_blank
+    assign_descriptions([bare], {("AAS", "1010"): "A catalog description"})
+    assert bare["_description"] == "A catalog description"
     described = dict(course, _description="A catalog description", _labels=["Historical Perspectives"])
     described_row = class_row(described)
     assert described_row["Description"] == "A catalog description"
@@ -492,6 +499,45 @@ def fill_attributes(courses, session, term):
         course["_labels"] = labels_from_details(data)
 
 
+def catalog_description(session, term, class_number):
+    data = request_sis_json(
+        session,
+        "IScript_ClassDetails",
+        term=term,
+        class_nbr=class_number,
+    )
+    section_info = data.get("section_info") or {}
+    catalog_descr = section_info.get("catalog_descr") or {}
+    text = catalog_descr.get("crse_catalog_description")
+    if not text or not str(text).strip():
+        return ""
+    return str(text).replace("\n", "").replace("\r", " ")
+
+
+def assign_descriptions(classes, filled):
+    """Copy non-empty description text onto each section. Blank text is ignored."""
+    for course in classes:
+        text = filled.get((course.get("subject") or "", str(course.get("catalog_nbr") or "")))
+        if text:
+            course["_description"] = text
+
+
+def fill_descriptions(classes, session, term):
+    """SIS catalog text for every course. A blank result does not replace stored text."""
+    unique = {}
+    for course in classes:
+        key = (course.get("subject") or "", str(course.get("catalog_nbr") or ""))
+        unique.setdefault(key, course)
+    print(f"descriptions start ({len(unique)} SIS)", flush=True)
+    filled = {}
+    for key, course in unique.items():
+        text = catalog_description(session, term, course["class_nbr"])
+        if text:
+            filled[key] = text
+    assign_descriptions(classes, filled)
+    print(f"descriptions done ({len(filled)} updated)", flush=True)
+
+
 def _page_payload(session, term, page):
     payload = request_sis_json(session, "IScript_ClassSearch", term=term, page=page)
     if "pageCount" not in payload or "classes" not in payload:
@@ -512,19 +558,26 @@ def fetch_pages(term):
 
 
 def main(argv):
-    if len(argv) == 2 and argv[1] == "--check":
+    if argv[1:] == ["--check"]:
         _check()
         return
-    if len(argv) == 1:
+    descriptions = False
+    term = None
+    for arg in argv[1:]:
+        if arg == "--descriptions":
+            descriptions = True
+        elif arg.isdigit() and term is None:
+            term = arg
+        else:
+            raise SystemExit("usage: python fetch_page.py [--descriptions] [sis-term]")
+    if term is None:
         term = term_for_date()
-    elif len(argv) == 2 and argv[1].isdigit():
-        term = argv[1]
-    else:
-        raise SystemExit("usage: python fetch_page.py [sis-term]")
     classes, page_count, session = fetch_pages(term)
     if not classes:
         raise SystemExit("SIS returned no sections; existing file was kept.")
     fill_attributes(classes, session, term)
+    if descriptions:
+        fill_descriptions(classes, session, term)
     # Write only after every request succeeds, so a failed run cannot replace the file.
     path, semester, changed = write_csv(term, classes)
     if changed:
