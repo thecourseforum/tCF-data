@@ -569,7 +569,7 @@ def run_each(fn, items):
 
 
 def fill_attributes(courses, session, term):
-    sis, _hoos = _worker_sessions(session)
+    """Unknown attribute codes, one ClassDetails call at a time on the search session."""
     pending = []
     for course in courses:
         labels = labels_from_codes(course.get("crse_attr_value"))
@@ -577,17 +577,14 @@ def fill_attributes(courses, session, term):
             pending.append(course)
         else:
             course["_labels"] = labels
-
-    def one(course):
+    for course in pending:
         data = request_sis_json(
-            sis(),
+            session,
             "IScript_ClassDetails",
             term=term,
             class_nbr=course["class_nbr"],
         )
         course["_labels"] = labels_from_details(data)
-
-    run_each(one, pending)
 
 
 def clean_description(text):
@@ -626,16 +623,6 @@ def fetch_hooslist_description(session, course):
     return text
 
 
-def fetch_course_description(course, sis_session, hoos_session, source, term):
-    """HoosList descriptions are the only permitted source fallback."""
-    if source == "hooslist":
-        try:
-            return clean_description(fetch_hooslist_description(hoos_session, course))
-        except (requests.RequestException, ValueError):
-            pass
-    return clean_description(fetch_sis_description(sis_session, course, term))
-
-
 def course_key(term, course):
     return (
         term,
@@ -647,18 +634,34 @@ def course_key(term, course):
 
 
 def fill_descriptions(courses, session, term):
+    """HoosList in parallel. SIS catalog text, one ClassDetails call at a time."""
     source = description_source(term)
-    sis, hoos = _worker_sessions(session)
     unique = {}
     for course in courses:
         unique.setdefault(course_key(term, course), course)
+    found = {}
+    fallbacks = []
+    if source == "hooslist":
+        _sis, hoos = _worker_sessions(session)
 
-    def one(course):
-        return course_key(term, course), fetch_course_description(
-            course, sis(), hoos(), source, term
+        def one(course):
+            try:
+                text = clean_description(fetch_hooslist_description(hoos(), course))
+            except (requests.RequestException, ValueError):
+                return course_key(term, course), None
+            return course_key(term, course), text
+
+        for key, text in run_each(one, unique.values()):
+            if text is None:
+                fallbacks.append(unique[key])
+            else:
+                found[key] = text
+    else:
+        fallbacks = list(unique.values())
+    for course in fallbacks:
+        found[course_key(term, course)] = clean_description(
+            fetch_sis_description(session, course, term)
         )
-
-    found = dict(run_each(one, unique.values()))
     for course in courses:
         course["_description"] = found[course_key(term, course)]
 
