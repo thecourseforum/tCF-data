@@ -11,7 +11,6 @@ import io
 import os
 import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
@@ -19,15 +18,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Lower this if SIS starts timing out.
-PAGE_WORKERS = 4
-# A class-search page has taken longer than 90s. 120s covers that without a 3-minute hang.
-CONNECT_TIMEOUT = 15
-READ_TIMEOUT = 120
-REQUEST_TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
+TIMEOUT = 30
 MAX_RETRIES = 5
-PAGE_ATTEMPTS = 2
-PAGE_RETRY_PAUSE = 5
 SIS_BASE = (
     "https://sisuva.admin.virginia.edu/psc/ihprd/UVSS/SA/s/"
     "WEBLIB_HCX_CM.H_CLASS_SEARCH.FieldFormula."
@@ -464,26 +456,6 @@ def _check():
     assert "Kept description" in _lines_by_class(kept)["10467"]
     assert _lines_by_class(kept)["10468"] == _lines_by_class(stored)["10468"]
     assert changed_class_count(stored, kept) == 1
-    assert PAGE_WORKERS > 1
-    assert is_transient_sis_failure(SystemExit("Read timed out. (read timeout=30)"))
-    assert is_transient_sis_failure(
-        SystemExit("SIS request failed: Connection aborted.")
-    )
-    assert not is_transient_sis_failure(
-        SystemExit("page 1 failed: SIS page is missing classes.")
-    )
-    tries = {"n": 0}
-
-    def flaky():
-        tries["n"] += 1
-        if tries["n"] < 3:
-            raise SystemExit("Read timed out. (read timeout=30)")
-        return {"ok": True}
-
-    assert call_with_timeout_retries(flaky, 4, lambda: None) == {"ok": True}
-    assert tries["n"] == 3
-    gathered = gather_pages(lambda page: {"classes": [{"class_nbr": page}]}, 5, PAGE_WORKERS)
-    assert [row["class_nbr"] for row in gathered] == [2, 3, 4, 5]
     seen = set()
     first = {"pageCount": 2, "classes": [{"class_nbr": 1}]}
     assert validate_first(first) == 2
@@ -503,22 +475,6 @@ def _check():
     print("ok")
 
 
-def gather_payloads(fetch_one, page_count, workers):
-    """Payloads for pages 2 through page_count, in page order."""
-    if page_count < 2:
-        return []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(fetch_one, range(2, page_count + 1)))
-
-
-def gather_pages(fetch_one, page_count, workers):
-    """Classes from pages 2 through page_count, in page order."""
-    classes = []
-    for payload in gather_payloads(fetch_one, page_count, workers):
-        classes.extend(payload.get("classes") or [])
-    return classes
-
-
 def validate_first(payload):
     total = int(payload["pageCount"])
     classes = payload.get("classes") or []
@@ -536,33 +492,15 @@ def take_page(payload, page, total_pages, seen):
     return list(records.values())
 
 
-def is_transient_sis_failure(error):
-    """A slow or dropped SIS connection. A bad page is not retried."""
-    text = str(error).lower()
-    return text.startswith("sis request failed") or "timed out" in text
-
-
-def call_with_timeout_retries(fetch, attempts, pause):
-    """Run fetch again after a timeout or a dropped connection. Other failures stop immediately."""
-    for attempt in range(attempts):
-        try:
-            return fetch()
-        except SystemExit as error:
-            if not is_transient_sis_failure(error) or attempt + 1 == attempts:
-                raise
-            pause()
-
-
 def create_session():
-    """Pooled session. urllib3 retries status 429 and 5xx. Read timeouts are retried by the caller."""
+    """Pooled session. urllib3 retries status 429 and 5xx up to five times."""
     session = requests.Session()
     retry = Retry(
         total=MAX_RETRIES,
-        read=0,
         backoff_factor=1,
         status_forcelist=(429, 500, 502, 503, 504),
     )
-    workers = max(PAGE_WORKERS, 8)
+    workers = min(32, (os.cpu_count() or 1) + 4)
     adapter = HTTPAdapter(
         pool_connections=workers,
         pool_maxsize=workers,
@@ -577,7 +515,7 @@ def request_sis_json(session, endpoint, **params):
         response = session.get(
             SIS_BASE + endpoint,
             params={"institution": "UVA01", **params},
-            timeout=REQUEST_TIMEOUT,
+            timeout=TIMEOUT,
         )
         response.raise_for_status()
         payload = response.json()
@@ -673,7 +611,7 @@ def fetch_hooslist_description(session, course):
     response = session.get(
         HOOSLIST_URL,
         params={"subject": course["subject"], "courseNum": course["catalog_nbr"]},
-        timeout=REQUEST_TIMEOUT,
+        timeout=TIMEOUT,
     )
     response.raise_for_status()
     text = response.text
@@ -726,46 +664,26 @@ def fill_descriptions(courses, session, term):
 
 
 def fetch_pages(term):
-    """Every class-search page for one term. The first response holds the session cookie."""
+    """Every class-search page for one term, one page at a time on one session."""
     session = create_session()
 
-    def fetch_one(page, page_session):
-        def once():
-            payload = request_sis_json(
-                page_session,
-                "IScript_ClassSearch",
-                term=term,
-                page=page,
-            )
-            if "pageCount" not in payload or "classes" not in payload:
-                raise SystemExit(f"page {page} failed: SIS page is missing classes.")
-            return payload
+    def fetch_one(page):
+        payload = request_sis_json(
+            session,
+            "IScript_ClassSearch",
+            term=term,
+            page=page,
+        )
+        if "pageCount" not in payload or "classes" not in payload:
+            raise SystemExit(f"page {page} failed: SIS page is missing classes.")
+        return payload
 
-        try:
-            return call_with_timeout_retries(
-                once, PAGE_ATTEMPTS, lambda: time.sleep(PAGE_RETRY_PAUSE)
-            )
-        except SystemExit as error:
-            if is_transient_sis_failure(error):
-                raise SystemExit(f"page {page} failed: {error}") from error
-            raise
-
-    first = fetch_one(1, session)
+    first = fetch_one(1)
     total_pages = validate_first(first)
     seen = set()
     classes = take_page(first, 1, total_pages, seen) if total_pages else []
-    local = threading.local()
-
-    def fetch_later(page):
-        page_session = getattr(local, "session", None)
-        if page_session is None:
-            page_session = create_session()
-            page_session.cookies.update(session.cookies)
-            local.session = page_session
-        return fetch_one(page, page_session)
-
-    for page, payload in enumerate(gather_payloads(fetch_later, total_pages, PAGE_WORKERS), 2):
-        classes.extend(take_page(payload, page, total_pages, seen))
+    for page in range(2, total_pages + 1):
+        classes.extend(take_page(fetch_one(page), page, total_pages, seen))
     return classes, total_pages, session
 
 
