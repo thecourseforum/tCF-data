@@ -11,6 +11,7 @@ import io
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
@@ -20,8 +21,13 @@ from urllib3.util.retry import Retry
 
 # Lower this if SIS starts timing out.
 PAGE_WORKERS = 4
-TIMEOUT = 30
+# A class-search page has taken longer than 90s. 120s covers that without a 3-minute hang.
+CONNECT_TIMEOUT = 15
+READ_TIMEOUT = 120
+REQUEST_TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
 MAX_RETRIES = 5
+PAGE_ATTEMPTS = 2
+PAGE_RETRY_PAUSE = 5
 SIS_BASE = (
     "https://sisuva.admin.virginia.edu/psc/ihprd/UVSS/SA/s/"
     "WEBLIB_HCX_CM.H_CLASS_SEARCH.FieldFormula."
@@ -459,6 +465,23 @@ def _check():
     assert _lines_by_class(kept)["10468"] == _lines_by_class(stored)["10468"]
     assert changed_class_count(stored, kept) == 1
     assert PAGE_WORKERS > 1
+    assert is_transient_sis_failure(SystemExit("Read timed out. (read timeout=30)"))
+    assert is_transient_sis_failure(
+        SystemExit("SIS request failed: Connection aborted.")
+    )
+    assert not is_transient_sis_failure(
+        SystemExit("page 1 failed: SIS page is missing classes.")
+    )
+    tries = {"n": 0}
+
+    def flaky():
+        tries["n"] += 1
+        if tries["n"] < 3:
+            raise SystemExit("Read timed out. (read timeout=30)")
+        return {"ok": True}
+
+    assert call_with_timeout_retries(flaky, 4, lambda: None) == {"ok": True}
+    assert tries["n"] == 3
     gathered = gather_pages(lambda page: {"classes": [{"class_nbr": page}]}, 5, PAGE_WORKERS)
     assert [row["class_nbr"] for row in gathered] == [2, 3, 4, 5]
     seen = set()
@@ -513,11 +536,29 @@ def take_page(payload, page, total_pages, seen):
     return list(records.values())
 
 
+def is_transient_sis_failure(error):
+    """A slow or dropped SIS connection. A bad page is not retried."""
+    text = str(error).lower()
+    return text.startswith("sis request failed") or "timed out" in text
+
+
+def call_with_timeout_retries(fetch, attempts, pause):
+    """Run fetch again after a timeout or a dropped connection. Other failures stop immediately."""
+    for attempt in range(attempts):
+        try:
+            return fetch()
+        except SystemExit as error:
+            if not is_transient_sis_failure(error) or attempt + 1 == attempts:
+                raise
+            pause()
+
+
 def create_session():
-    """Pooled session. urllib3 retries status 429 and 5xx up to five times."""
+    """Pooled session. urllib3 retries status 429 and 5xx. Read timeouts are retried by the caller."""
     session = requests.Session()
     retry = Retry(
         total=MAX_RETRIES,
+        read=0,
         backoff_factor=1,
         status_forcelist=(429, 500, 502, 503, 504),
     )
@@ -536,7 +577,7 @@ def request_sis_json(session, endpoint, **params):
         response = session.get(
             SIS_BASE + endpoint,
             params={"institution": "UVA01", **params},
-            timeout=TIMEOUT,
+            timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
         payload = response.json()
@@ -632,7 +673,7 @@ def fetch_hooslist_description(session, course):
     response = session.get(
         HOOSLIST_URL,
         params={"subject": course["subject"], "courseNum": course["catalog_nbr"]},
-        timeout=TIMEOUT,
+        timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     text = response.text
@@ -689,15 +730,25 @@ def fetch_pages(term):
     session = create_session()
 
     def fetch_one(page, page_session):
-        payload = request_sis_json(
-            page_session,
-            "IScript_ClassSearch",
-            term=term,
-            page=page,
-        )
-        if "pageCount" not in payload or "classes" not in payload:
-            raise SystemExit(f"page {page} failed: SIS page is missing classes.")
-        return payload
+        def once():
+            payload = request_sis_json(
+                page_session,
+                "IScript_ClassSearch",
+                term=term,
+                page=page,
+            )
+            if "pageCount" not in payload or "classes" not in payload:
+                raise SystemExit(f"page {page} failed: SIS page is missing classes.")
+            return payload
+
+        try:
+            return call_with_timeout_retries(
+                once, PAGE_ATTEMPTS, lambda: time.sleep(PAGE_RETRY_PAUSE)
+            )
+        except SystemExit as error:
+            if is_transient_sis_failure(error):
+                raise SystemExit(f"page {page} failed: {error}") from error
+            raise
 
     first = fetch_one(1, session)
     total_pages = validate_first(first)
