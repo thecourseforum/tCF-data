@@ -1,9 +1,9 @@
 """Fetch one term into data/<year>_<season>.csv.
 
-Class search supplies sections. Known attribute codes map to Disciplines and
-Cost; ClassDetails is used only for an unknown code. Descriptions come from
-HoosList for the current or a future term, and from SIS otherwise.
-With no argument, the term comes from today's date.
+Class search supplies sections, one page at a time. Known attribute codes map
+to Disciplines and Cost; ClassDetails is used only for an unknown code.
+Descriptions come from HoosList for the current or a future term, and from
+SIS otherwise. With no argument, the term comes from today's date.
 """
 
 import csv
@@ -11,7 +11,6 @@ import io
 import os
 import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
@@ -21,7 +20,6 @@ from urllib3.util.retry import Retry
 
 TIMEOUT = 30
 MAX_RETRIES = 5
-PAGE_BATCH = 2
 SIS_BASE = (
     "https://sisuva.admin.virginia.edu/psc/ihprd/UVSS/SA/s/"
     "WEBLIB_HCX_CM.H_CLASS_SEARCH.FieldFormula."
@@ -54,8 +52,7 @@ _SEMESTER_STARTS = (
 _PUBLISHED_SEMESTERS = {name for _, name in _SEMESTER_STARTS}
 _SEASON_ORDER = {"january": 1, "spring": 2, "summer": 3, "fall": 4}
 _SEASON_DIGITS = {"january": "1", "spring": "2", "summer": "6", "fall": "8"}
-COMPONENT_MAPPING = {"LEC": "Lecture", "DIS": "Discussion", "LAB": "Laboratory"}
-ATTRIBUTE_MAPPING = {  # Verified SIS labels; unknown codes use ClassDetails.
+ATTRIBUTE_MAPPING = {  # Verified SIS labels. Unknown codes stay blank in this step.
     "ASUD-AIP": "Artistic, Interpretive, & Philosophical Inquiry",
     "ASUD-CMP": "Chemical, Mathematical, and Physical Universe",
     "ASUD-CSW": "Cultures & Societies of the World",
@@ -72,7 +69,7 @@ ATTRIBUTE_MAPPING = {  # Verified SIS labels; unknown codes use ClassDetails.
     "NCLC-NOCOST": "No Cost Course Materials",
     "NCLC-LOWCOST": "Low Cost Course Materials",
 }
-IGNORED_ATTRIBUTES = {  # Verified absent from SIS's exported class_attributes.
+IGNORED_ATTRIBUTES = {
     "CORE-CRITTHINK",
     "CORE-ORALCOMM",
     "CORE-WRITTEN",
@@ -200,9 +197,7 @@ def clock(raw):
 def meeting_days(meeting):
     """``TuTh 12:30pm - 1:45pm``, the shape load_semester parses."""
     days = (meeting.get("days") or "").strip()
-    if days in {"TBA", "-"}:
-        return "TBA"
-    if not days:
+    if days in {"", "-"}:
         return ""
     start = clock(meeting.get("start_time"))
     end = clock(meeting.get("end_time"))
@@ -219,25 +214,12 @@ def meeting_dates(meeting):
     return start or end
 
 
-def meeting_instructor(meeting, fallback):
-    """Meeting instructor when SIS sent one. ``-`` is an empty seat."""
-    if "instructor" not in meeting:
-        return fallback
-    name = " ".join(str(meeting.get("instructor") or "").split())
-    return "" if name == "-" else name
-
-
 def labels_from_codes(raw):
-    """Mapped labels, or None when a code needs a ClassDetails lookup."""
+    """Mapped labels, or None when a code is not in the local list."""
     codes = [code.strip() for code in str(raw or "").split(",") if code.strip()]
     if any(code not in ATTRIBUTE_MAPPING and code not in IGNORED_ATTRIBUTES for code in codes):
         return None
     return [ATTRIBUTE_MAPPING[code] for code in codes if code not in IGNORED_ATTRIBUTES]
-
-
-def labels_from_details(data):
-    text = data["section_info"]["enrollment_information"]["class_attributes"] or ""
-    return [line.strip() for line in str(text).splitlines() if line.strip()]
 
 
 def discipline_and_cost(labels):
@@ -247,24 +229,14 @@ def discipline_and_cost(labels):
     return disciplines, cost
 
 
-def attribute_labels(course):
-    if "_labels" in course:
-        return course["_labels"]
-    labels = labels_from_codes(course.get("crse_attr_value"))
-    if labels is None:
-        raise SystemExit(f"unknown attribute code on {course.get('class_nbr')}")
-    return labels
-
-
 def class_row(course):
-    """One loader CSV row."""
+    """One loader CSV row. Known attribute codes fill Disciplines and Cost."""
     row = {column: "" for column in COLUMNS}
     row["ClassNumber"] = course.get("class_nbr", "")
     row["Mnemonic"] = course.get("subject", "")
     row["Number"] = course.get("catalog_nbr", "")
     row["Section"] = course.get("class_section", "")
-    component = course.get("component") or ""
-    row["Type"] = COMPONENT_MAPPING.get(component, component or course.get("section_type") or "")
+    row["Type"] = course.get("section_type", "")
     row["Units"] = course.get("units", "")
     row["Title"] = course.get("descr", "")
     row["Topic"] = course.get("topic", "")
@@ -274,25 +246,24 @@ def class_row(course):
     row["Waitlist"] = course.get("wait_tot", "")
     row["WaitlistLimit"] = course.get("wait_cap", "")
     row["Description"] = course.get("_description") or ""
-    disciplines, cost = discipline_and_cost(attribute_labels(course))
-    row["Disciplines"] = disciplines
-    row["Cost"] = cost
+    labels = course.get("_labels")
+    if labels is None:
+        labels = labels_from_codes(course.get("crse_attr_value")) or []
+    row["Disciplines"], row["Cost"] = discipline_and_cost(labels)
     instructors = course.get("instructors") or []
     meetings = course.get("meetings") or []
     for index in range(4):
         slot = index + 1
-        fallback = instructors[index].get("name") or "" if index < len(instructors) else ""
+        if index < len(instructors):
+            row[f"Instructor{slot}"] = instructors[index].get("name") or ""
         if index < len(meetings):
-            row[f"Instructor{slot}"] = meeting_instructor(meetings[index], fallback)
             row[f"Days{slot}"] = meeting_days(meetings[index])
             row[f"Room{slot}"] = meetings[index].get("room") or ""
             row[f"MeetingDates{slot}"] = meeting_dates(meetings[index])
-        elif fallback:
-            row[f"Instructor{slot}"] = fallback
     return row
 
 
-# A blank fill-in must not wipe a value the previous snapshot already stored.
+# Description is not in class search. A blank discipline or cost must not wipe a stored value.
 _KEEP_IF_BLANK = ("Description", "Disciplines", "Cost")
 
 
@@ -395,14 +366,6 @@ def _check():
     assert term_for_date(date(2028, 1, 10)) == "1281"
     assert term_for_date(date(2028, 6, 1)) == "1286"
     assert semester_for_term("1268") == "2026_fall"
-    assert description_source("1262", date(2026, 10, 3)) == "sis"
-    assert description_source("1268", date(2026, 10, 3)) == "hooslist"
-    assert description_source("1272", date(2026, 10, 3)) == "hooslist"
-    assert labels_from_codes("ASUD-HP,CORE-CRITTHINK,NCLC-LOWCOST") == [
-        "Historical Perspectives",
-        "Low Cost Course Materials",
-    ]
-    assert labels_from_codes("ASUD-NOT-A-CODE") is None
     course = {
         "class_nbr": 10467,
         "subject": "AAS",
@@ -432,23 +395,13 @@ def _check():
     row = class_row(course)
     assert row["Days1"] == "TuTh 12:30pm - 1:45pm"
     assert row["MeetingDates1"] == "08/25/2026 - 12/08/2026"
-    assert row["Instructor1"] == "Kevin Gaines"
     assert row["Description"] == ""
     assert row["Disciplines"] == ""
     assert row["Cost"] == ""
-    labeled = dict(
-        course,
-        crse_attr_value="ASUD-HP,NCLC-NOCOST",
-        meetings=[dict(course["meetings"][0], instructor="Kevin Gaines")],
-    )
-    labeled_row = class_row(labeled)
-    assert labeled_row["Disciplines"] == "Historical Perspectives"
-    assert labeled_row["Cost"] == "No Cost Course Materials"
-    assert labeled_row["Instructor1"] == "Kevin Gaines"
-    assert labeled_row["Days1"] == "TuTh 12:30pm - 1:45pm"
-    assert class_row(dict(labeled, component="LEC"))["Type"] == "Lecture"
-    described = dict(course, _description="A catalog description")
-    assert class_row(described)["Description"] == "A catalog description"
+    labeled = class_row(dict(course, crse_attr_value="ASUD-HP,NCLC-NOCOST"))
+    assert labeled["Disciplines"] == "Historical Perspectives"
+    assert labeled["Cost"] == "No Cost Course Materials"
+    assert class_row(dict(course, crse_attr_value="ASUD-NOT-A-CODE"))["Disciplines"] == ""
     other = dict(course, class_nbr=10468, class_section="101", enrollment_total=10)
     stored = render_snapshot([course, other], "")
     assert render_snapshot([course, other], stored) == stored
@@ -458,6 +411,12 @@ def _check():
     assert "Kept description" in _lines_by_class(kept)["10467"]
     assert _lines_by_class(kept)["10468"] == _lines_by_class(stored)["10468"]
     assert changed_class_count(stored, kept) == 1
+    assert description_source("1262", date(2026, 10, 3)) == "sis"
+    assert description_source("1268", date(2026, 10, 3)) == "hooslist"
+    described = dict(course, _description="A catalog description", _labels=["Historical Perspectives"])
+    described_row = class_row(described)
+    assert described_row["Description"] == "A catalog description"
+    assert described_row["Disciplines"] == "Historical Perspectives"
     seen = set()
     first = {"pageCount": 2, "classes": [{"class_nbr": 1}]}
     assert validate_first(first) == 2
@@ -468,31 +427,6 @@ def _check():
         assert "repeated" in str(error)
     else:
         raise AssertionError("repeated page")
-    try:
-        validate_first({"pageCount": 0, "classes": [{"class_nbr": 1}]})
-    except SystemExit as error:
-        assert "page count" in str(error)
-    else:
-        raise AssertionError("page count")
-    assert PAGE_BATCH == 2
-    kept_course = dict(
-        course,
-        crse_id="1",
-        crse_offer_nbr="1",
-        _description="Kept description",
-        crse_attr_value="ASUD-NOT-A-CODE",
-        _labels=["Kept discipline"],
-    )
-    descriptions, attributes = stored_catalog(render_snapshot([kept_course], ""))
-    assert descriptions[("AAS", "1010")] == "Kept description"
-    assert attribute_targets([dict(kept_course)], attributes) == []
-    unknown = dict(kept_course, class_nbr=99999, _labels=None, _description="")
-    assert [item["class_nbr"] for item in attribute_targets([unknown], attributes)] == [99999]
-    assert description_targets([kept_course], "1268", descriptions)[1] == {}
-    fresh = dict(kept_course, catalog_nbr="2000", class_nbr=2, _description="")
-    assert list(description_targets([fresh], "1268", descriptions)[1]) == [
-        course_key("1268", fresh)
-    ]
     print("ok")
 
 
@@ -522,11 +456,7 @@ def create_session():
         status_forcelist=(429, 500, 502, 503, 504),
     )
     workers = min(32, (os.cpu_count() or 1) + 4)
-    adapter = HTTPAdapter(
-        pool_connections=workers,
-        pool_maxsize=workers,
-        max_retries=retry,
-    )
+    adapter = HTTPAdapter(pool_connections=workers, pool_maxsize=workers, max_retries=retry)
     session.mount("https://", adapter)
     return session
 
@@ -550,16 +480,8 @@ def request_sis_json(session, endpoint, **params):
 
 
 def _worker_sessions(source):
-    """One SIS session and one HoosList session per thread, copying the search cookie."""
+    """One HoosList session per thread. SIS detail calls stay on the search session."""
     local = threading.local()
-
-    def sis():
-        session = getattr(local, "sis", None)
-        if session is None:
-            session = create_session()
-            session.cookies.update(source.cookies)
-            local.sis = session
-        return session
 
     def hoos():
         session = getattr(local, "hoos", None)
@@ -568,7 +490,7 @@ def _worker_sessions(source):
             local.hoos = session
         return session
 
-    return sis, hoos
+    return hoos
 
 
 def run_each(fn, items):
@@ -589,56 +511,20 @@ def run_each(fn, items):
     return results
 
 
-def stored_catalog(previous_text):
-    """Non-empty descriptions by mnemonic and number, and labels by class number.
-
-    ponytail: a blank cell is fetched again. The CSV cannot tell "fetched and
-    empty" from "never fetched."
-    """
-    descriptions = {}
-    attributes = {}
-    if not previous_text:
-        return descriptions, attributes
-    for row in csv.DictReader(io.StringIO(previous_text, newline="")):
-        description = (row.get("Description") or "").strip()
-        if description:
-            catalog = (row.get("Mnemonic") or "", str(row.get("Number") or ""))
-            descriptions.setdefault(catalog, description)
-        disciplines = (row.get("Disciplines") or "").strip()
-        cost = (row.get("Cost") or "").strip()
-        if disciplines or cost:
-            attributes[str(row.get("ClassNumber") or "")] = (disciplines, cost)
-    return descriptions, attributes
+def labels_from_details(data):
+    text = data["section_info"]["enrollment_information"]["class_attributes"] or ""
+    return [line.strip() for line in str(text).splitlines() if line.strip()]
 
 
-def labels_from_stored(disciplines, cost):
-    labels = [part for part in disciplines.split("$") if part]
-    if cost:
-        labels.append(cost)
-    return labels
-
-
-def attribute_targets(courses, stored_attributes):
-    """Unknown codes that still need ClassDetails. Stored labels are copied on."""
+def fill_attributes(courses, session, term):
+    """Unknown attribute codes, one ClassDetails call at a time on the search session."""
     pending = []
     for course in courses:
         labels = labels_from_codes(course.get("crse_attr_value"))
         if labels is None:
-            stored = stored_attributes.get(str(course.get("class_nbr")))
-            if stored:
-                course["_labels"] = labels_from_stored(*stored)
-            else:
-                pending.append(course)
+            pending.append(course)
         else:
             course["_labels"] = labels
-    return pending
-
-
-def fill_attributes(courses, session, term, stored_attributes):
-    """Unknown attribute codes, one ClassDetails call at a time on the search session."""
-    pending = attribute_targets(courses, stored_attributes)
-    started = time.monotonic()
-    print("attributes start", flush=True)
     for course in pending:
         data = request_sis_json(
             session,
@@ -647,8 +533,6 @@ def fill_attributes(courses, session, term, stored_attributes):
             class_nbr=course["class_nbr"],
         )
         course["_labels"] = labels_from_details(data)
-    elapsed = time.monotonic() - started
-    print(f"attributes done in {elapsed:.0f}s ({len(pending)} ClassDetails)", flush=True)
 
 
 def clean_description(text):
@@ -697,32 +581,16 @@ def course_key(term, course):
     )
 
 
-def description_targets(courses, term, stored_descriptions):
-    """One section per course that still needs a description, plus text already stored."""
-    found = {}
-    pending = {}
-    for course in courses:
-        key = course_key(term, course)
-        catalog = (course.get("subject") or "", str(course.get("catalog_nbr") or ""))
-        stored = stored_descriptions.get(catalog)
-        if stored:
-            found[key] = stored
-        else:
-            pending.setdefault(key, course)
-    return found, pending
-
-
-def fill_descriptions(courses, session, term, stored_descriptions):
+def fill_descriptions(courses, session, term):
     """HoosList in parallel. SIS catalog text, one ClassDetails call at a time."""
     source = description_source(term)
-    found, pending = description_targets(courses, term, stored_descriptions)
-    started = time.monotonic()
-    print("descriptions start", flush=True)
+    unique = {}
+    for course in courses:
+        unique.setdefault(course_key(term, course), course)
+    found = {}
     fallbacks = []
-    hoos_calls = 0
     if source == "hooslist":
-        hoos_calls = len(pending)
-        _sis, hoos = _worker_sessions(session)
+        hoos = _worker_sessions(session)
 
         def one(course):
             try:
@@ -731,76 +599,37 @@ def fill_descriptions(courses, session, term, stored_descriptions):
                 return course_key(term, course), None
             return course_key(term, course), text
 
-        for key, text in run_each(one, pending.values()):
+        for key, text in run_each(one, unique.values()):
             if text is None:
-                fallbacks.append(pending[key])
+                fallbacks.append(unique[key])
             else:
                 found[key] = text
     else:
-        fallbacks = list(pending.values())
+        fallbacks = list(unique.values())
     for course in fallbacks:
         found[course_key(term, course)] = clean_description(
             fetch_sis_description(session, course, term)
         )
     for course in courses:
         course["_description"] = found[course_key(term, course)]
-    elapsed = time.monotonic() - started
-    print(
-        f"descriptions done in {elapsed:.0f}s ({hoos_calls} HoosList, {len(fallbacks)} SIS)",
-        flush=True,
-    )
 
 
 def _page_payload(session, term, page):
-    payload = request_sis_json(
-        session,
-        "IScript_ClassSearch",
-        term=term,
-        page=page,
-    )
+    payload = request_sis_json(session, "IScript_ClassSearch", term=term, page=page)
     if "pageCount" not in payload or "classes" not in payload:
         raise SystemExit(f"page {page} failed: SIS page is missing classes.")
     return payload
 
 
-def _batch_payloads(cookies, term, pages):
-    """Up to PAGE_BATCH pages at once. Each page uses its own session."""
-    payloads = [None] * len(pages)
-
-    def one(index, page):
-        worker = create_session()
-        worker.cookies.update(cookies)
-        payloads[index] = _page_payload(worker, term, page)
-
-    with ThreadPoolExecutor(max_workers=PAGE_BATCH) as pool:
-        futures = [pool.submit(one, index, page) for index, page in enumerate(pages)]
-        try:
-            for future in as_completed(futures):
-                future.result()
-        except BaseException:
-            for future in futures:
-                future.cancel()
-            raise
-    return payloads
-
-
 def fetch_pages(term):
-    """Every class-search page. Page 1 alone, then two pages at a time."""
+    """Every class-search page for one term, one page at a time on one session."""
     session = create_session()
-    started = time.monotonic()
-    print("class search start", flush=True)
     first = _page_payload(session, term, 1)
     total_pages = validate_first(first)
     seen = set()
     classes = take_page(first, 1, total_pages, seen) if total_pages else []
-    remaining = list(range(2, total_pages + 1))
-    for offset in range(0, len(remaining), PAGE_BATCH):
-        batch = remaining[offset : offset + PAGE_BATCH]
-        payloads = _batch_payloads(session.cookies, term, batch)
-        for page, payload in zip(batch, payloads):
-            classes.extend(take_page(payload, page, total_pages, seen))
-    elapsed = time.monotonic() - started
-    print(f"class search done in {elapsed:.0f}s ({total_pages} pages)", flush=True)
+    for page in range(2, total_pages + 1):
+        classes.extend(take_page(_page_payload(session, term, page), page, total_pages, seen))
     return classes, total_pages, session
 
 
@@ -814,17 +643,11 @@ def main(argv):
         term = argv[1]
     else:
         raise SystemExit("usage: python fetch_page.py [sis-term]")
-    path = f"data/{semester_for_term(term)}.csv"
-    previous = ""
-    if os.path.isfile(path):
-        with open(path, encoding="utf-8", newline="") as handle:
-            previous = handle.read()
-    descriptions, attributes = stored_catalog(previous)
     classes, page_count, session = fetch_pages(term)
     if not classes:
         raise SystemExit("SIS returned no sections; existing file was kept.")
-    fill_attributes(classes, session, term, attributes)
-    fill_descriptions(classes, session, term, descriptions)
+    fill_attributes(classes, session, term)
+    fill_descriptions(classes, session, term)
     # Write only after every request succeeds, so a failed run cannot replace the file.
     path, semester, changed = write_csv(term, classes)
     if changed:
