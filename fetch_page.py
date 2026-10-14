@@ -11,6 +11,7 @@ import io
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
@@ -20,6 +21,7 @@ from urllib3.util.retry import Retry
 
 TIMEOUT = 30
 MAX_RETRIES = 5
+PAGE_BATCH = 2
 SIS_BASE = (
     "https://sisuva.admin.virginia.edu/psc/ihprd/UVSS/SA/s/"
     "WEBLIB_HCX_CM.H_CLASS_SEARCH.FieldFormula."
@@ -472,6 +474,25 @@ def _check():
         assert "page count" in str(error)
     else:
         raise AssertionError("page count")
+    assert PAGE_BATCH == 2
+    kept_course = dict(
+        course,
+        crse_id="1",
+        crse_offer_nbr="1",
+        _description="Kept description",
+        crse_attr_value="ASUD-NOT-A-CODE",
+        _labels=["Kept discipline"],
+    )
+    descriptions, attributes = stored_catalog(render_snapshot([kept_course], ""))
+    assert descriptions[("AAS", "1010")] == "Kept description"
+    assert attribute_targets([dict(kept_course)], attributes) == []
+    unknown = dict(kept_course, class_nbr=99999, _labels=None, _description="")
+    assert [item["class_nbr"] for item in attribute_targets([unknown], attributes)] == [99999]
+    assert description_targets([kept_course], "1268", descriptions)[1] == {}
+    fresh = dict(kept_course, catalog_nbr="2000", class_nbr=2, _description="")
+    assert list(description_targets([fresh], "1268", descriptions)[1]) == [
+        course_key("1268", fresh)
+    ]
     print("ok")
 
 
@@ -568,15 +589,56 @@ def run_each(fn, items):
     return results
 
 
-def fill_attributes(courses, session, term):
-    """Unknown attribute codes, one ClassDetails call at a time on the search session."""
+def stored_catalog(previous_text):
+    """Non-empty descriptions by mnemonic and number, and labels by class number.
+
+    ponytail: a blank cell is fetched again. The CSV cannot tell "fetched and
+    empty" from "never fetched."
+    """
+    descriptions = {}
+    attributes = {}
+    if not previous_text:
+        return descriptions, attributes
+    for row in csv.DictReader(io.StringIO(previous_text, newline="")):
+        description = (row.get("Description") or "").strip()
+        if description:
+            catalog = (row.get("Mnemonic") or "", str(row.get("Number") or ""))
+            descriptions.setdefault(catalog, description)
+        disciplines = (row.get("Disciplines") or "").strip()
+        cost = (row.get("Cost") or "").strip()
+        if disciplines or cost:
+            attributes[str(row.get("ClassNumber") or "")] = (disciplines, cost)
+    return descriptions, attributes
+
+
+def labels_from_stored(disciplines, cost):
+    labels = [part for part in disciplines.split("$") if part]
+    if cost:
+        labels.append(cost)
+    return labels
+
+
+def attribute_targets(courses, stored_attributes):
+    """Unknown codes that still need ClassDetails. Stored labels are copied on."""
     pending = []
     for course in courses:
         labels = labels_from_codes(course.get("crse_attr_value"))
         if labels is None:
-            pending.append(course)
+            stored = stored_attributes.get(str(course.get("class_nbr")))
+            if stored:
+                course["_labels"] = labels_from_stored(*stored)
+            else:
+                pending.append(course)
         else:
             course["_labels"] = labels
+    return pending
+
+
+def fill_attributes(courses, session, term, stored_attributes):
+    """Unknown attribute codes, one ClassDetails call at a time on the search session."""
+    pending = attribute_targets(courses, stored_attributes)
+    started = time.monotonic()
+    print("attributes start", flush=True)
     for course in pending:
         data = request_sis_json(
             session,
@@ -585,6 +647,8 @@ def fill_attributes(courses, session, term):
             class_nbr=course["class_nbr"],
         )
         course["_labels"] = labels_from_details(data)
+    elapsed = time.monotonic() - started
+    print(f"attributes done in {elapsed:.0f}s ({len(pending)} ClassDetails)", flush=True)
 
 
 def clean_description(text):
@@ -633,15 +697,31 @@ def course_key(term, course):
     )
 
 
-def fill_descriptions(courses, session, term):
+def description_targets(courses, term, stored_descriptions):
+    """One section per course that still needs a description, plus text already stored."""
+    found = {}
+    pending = {}
+    for course in courses:
+        key = course_key(term, course)
+        catalog = (course.get("subject") or "", str(course.get("catalog_nbr") or ""))
+        stored = stored_descriptions.get(catalog)
+        if stored:
+            found[key] = stored
+        else:
+            pending.setdefault(key, course)
+    return found, pending
+
+
+def fill_descriptions(courses, session, term, stored_descriptions):
     """HoosList in parallel. SIS catalog text, one ClassDetails call at a time."""
     source = description_source(term)
-    unique = {}
-    for course in courses:
-        unique.setdefault(course_key(term, course), course)
-    found = {}
+    found, pending = description_targets(courses, term, stored_descriptions)
+    started = time.monotonic()
+    print("descriptions start", flush=True)
     fallbacks = []
+    hoos_calls = 0
     if source == "hooslist":
+        hoos_calls = len(pending)
         _sis, hoos = _worker_sessions(session)
 
         def one(course):
@@ -651,42 +731,76 @@ def fill_descriptions(courses, session, term):
                 return course_key(term, course), None
             return course_key(term, course), text
 
-        for key, text in run_each(one, unique.values()):
+        for key, text in run_each(one, pending.values()):
             if text is None:
-                fallbacks.append(unique[key])
+                fallbacks.append(pending[key])
             else:
                 found[key] = text
     else:
-        fallbacks = list(unique.values())
+        fallbacks = list(pending.values())
     for course in fallbacks:
         found[course_key(term, course)] = clean_description(
             fetch_sis_description(session, course, term)
         )
     for course in courses:
         course["_description"] = found[course_key(term, course)]
+    elapsed = time.monotonic() - started
+    print(
+        f"descriptions done in {elapsed:.0f}s ({hoos_calls} HoosList, {len(fallbacks)} SIS)",
+        flush=True,
+    )
+
+
+def _page_payload(session, term, page):
+    payload = request_sis_json(
+        session,
+        "IScript_ClassSearch",
+        term=term,
+        page=page,
+    )
+    if "pageCount" not in payload or "classes" not in payload:
+        raise SystemExit(f"page {page} failed: SIS page is missing classes.")
+    return payload
+
+
+def _batch_payloads(cookies, term, pages):
+    """Up to PAGE_BATCH pages at once. Each page uses its own session."""
+    payloads = [None] * len(pages)
+
+    def one(index, page):
+        worker = create_session()
+        worker.cookies.update(cookies)
+        payloads[index] = _page_payload(worker, term, page)
+
+    with ThreadPoolExecutor(max_workers=PAGE_BATCH) as pool:
+        futures = [pool.submit(one, index, page) for index, page in enumerate(pages)]
+        try:
+            for future in as_completed(futures):
+                future.result()
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
+    return payloads
 
 
 def fetch_pages(term):
-    """Every class-search page for one term, one page at a time on one session."""
+    """Every class-search page. Page 1 alone, then two pages at a time."""
     session = create_session()
-
-    def fetch_one(page):
-        payload = request_sis_json(
-            session,
-            "IScript_ClassSearch",
-            term=term,
-            page=page,
-        )
-        if "pageCount" not in payload or "classes" not in payload:
-            raise SystemExit(f"page {page} failed: SIS page is missing classes.")
-        return payload
-
-    first = fetch_one(1)
+    started = time.monotonic()
+    print("class search start", flush=True)
+    first = _page_payload(session, term, 1)
     total_pages = validate_first(first)
     seen = set()
     classes = take_page(first, 1, total_pages, seen) if total_pages else []
-    for page in range(2, total_pages + 1):
-        classes.extend(take_page(fetch_one(page), page, total_pages, seen))
+    remaining = list(range(2, total_pages + 1))
+    for offset in range(0, len(remaining), PAGE_BATCH):
+        batch = remaining[offset : offset + PAGE_BATCH]
+        payloads = _batch_payloads(session.cookies, term, batch)
+        for page, payload in zip(batch, payloads):
+            classes.extend(take_page(payload, page, total_pages, seen))
+    elapsed = time.monotonic() - started
+    print(f"class search done in {elapsed:.0f}s ({total_pages} pages)", flush=True)
     return classes, total_pages, session
 
 
@@ -700,11 +814,17 @@ def main(argv):
         term = argv[1]
     else:
         raise SystemExit("usage: python fetch_page.py [sis-term]")
+    path = f"data/{semester_for_term(term)}.csv"
+    previous = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8", newline="") as handle:
+            previous = handle.read()
+    descriptions, attributes = stored_catalog(previous)
     classes, page_count, session = fetch_pages(term)
     if not classes:
         raise SystemExit("SIS returned no sections; existing file was kept.")
-    fill_attributes(classes, session, term)
-    fill_descriptions(classes, session, term)
+    fill_attributes(classes, session, term, attributes)
+    fill_descriptions(classes, session, term, descriptions)
     # Write only after every request succeeds, so a failed run cannot replace the file.
     path, semester, changed = write_csv(term, classes)
     if changed:

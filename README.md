@@ -19,7 +19,7 @@ The extra fields come from the faster course fetcher in [theCourseForum2#1306](h
 
 Class search supplies every section. Known attribute codes map to Disciplines and Cost here. ClassDetails runs only for an unknown code. Descriptions are fetched once per course: HoosList for the current or a future term, SIS catalog text for older terms, and SIS again if HoosList fails or returns non-text. An empty SIS description stays blank. Requests use a pooled session and retry up to five times. An empty, repeated, or inconsistent page stops the run.
 
-The registrar term dates stay as they were, including January. Meeting times stay `TuTh 12:30pm - 1:45pm`, which `load_semester` parses. Class-search pages are requested one at a time. A blank description, discipline, or cost leaves the previous value in the file.
+The registrar term dates stay as they were, including January. Meeting times stay `TuTh 12:30pm - 1:45pm`, which `load_semester` parses. Class-search pages are requested two at a time. A blank description, discipline, or cost leaves the previous value in the file.
 
 ## GitHub Action
 
