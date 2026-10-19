@@ -10,8 +10,10 @@ import csv
 import io
 import os
 import sys
+import tempfile
 from datetime import date
 
+import certifi
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -349,81 +351,12 @@ def write_csv(term, classes):
 
 
 def _check():
-    assert term_for_date(date(2026, 1, 2)) == "1261"
-    assert term_for_date(date(2026, 1, 12)) == "1262"
-    assert term_for_date(date(2026, 5, 18)) == "1266"
-    assert term_for_date(date(2026, 8, 25)) == "1268"
-    assert term_for_date(date(2026, 10, 3)) == "1268"
-    assert term_for_date(date(2028, 1, 10)) == "1281"
-    assert term_for_date(date(2028, 6, 1)) == "1286"
-    assert semester_for_term("1268") == "2026_fall"
-    course = {
-        "class_nbr": 10467,
-        "subject": "AAS",
-        "catalog_nbr": "1010",
-        "class_section": "100",
-        "section_type": "Lecture",
-        "units": "4",
-        "descr": "Introduction to African-American and African Studies I",
-        "topic": "",
-        "enrl_stat_descr": "Open",
-        "enrollment_total": 157,
-        "class_capacity": 180,
-        "wait_tot": 1,
-        "wait_cap": 199,
-        "instructors": [{"name": "Kevin Gaines"}],
-        "meetings": [
-            {
-                "days": "TuTh",
-                "start_time": "12.30.00.000000",
-                "end_time": "13.45.00.000000",
-                "room": "***",
-                "start_dt": "08/25/2026",
-                "end_dt": "12/08/2026",
-            }
-        ],
-    }
-    row = class_row(course)
-    assert row["Days1"] == "TuTh 12:30pm - 1:45pm"
-    assert row["MeetingDates1"] == "08/25/2026 - 12/08/2026"
-    assert row["Description"] == ""
-    assert row["Disciplines"] == ""
-    assert row["Cost"] == ""
-    labeled = class_row(dict(course, crse_attr_value="ASUD-HP,NCLC-NOCOST"))
-    assert labeled["Disciplines"] == "Historical Perspectives"
-    assert labeled["Cost"] == "No Cost Course Materials"
-    assert class_row(dict(course, crse_attr_value="ASUD-NOT-A-CODE"))["Disciplines"] == ""
-    other = dict(course, class_nbr=10468, class_section="101", enrollment_total=10)
-    stored = render_snapshot([course, other], "")
-    assert render_snapshot([course, other], stored) == stored
-    enriched = stored.replace(",,,\n", ",Kept description,Kept discipline,\n", 1)
-    bumped = dict(course, enrollment_total=158)
-    kept = render_snapshot([bumped, other], enriched)
-    assert "Kept description" in _lines_by_class(kept)["10467"]
-    assert _lines_by_class(kept)["10468"] == _lines_by_class(stored)["10468"]
-    assert changed_class_count(stored, kept) == 1
-    bare = dict(course)
-    assign_descriptions([bare], {("AAS", "1010"): ""})
-    assert not bare.get("_description")
-    kept_blank = render_snapshot([bare], enriched)
-    assert "Kept description" in kept_blank
-    assign_descriptions([bare], {("AAS", "1010"): "A catalog description"})
-    assert bare["_description"] == "A catalog description"
-    described = dict(course, _description="A catalog description", _labels=["Historical Perspectives"])
-    described_row = class_row(described)
-    assert described_row["Description"] == "A catalog description"
-    assert described_row["Disciplines"] == "Historical Perspectives"
-    seen = set()
-    first = {"pageCount": 2, "classes": [{"class_nbr": 1}]}
-    assert validate_first(first) == 2
-    assert take_page(first, 1, 2, seen)[0]["class_nbr"] == 1
-    try:
-        take_page({"pageCount": 2, "classes": [{"class_nbr": 1}]}, 2, 2, seen)
-    except SystemExit as error:
-        assert "repeated" in str(error)
-    else:
-        raise AssertionError("repeated page")
-    print("ok")
+    import unittest
+
+    suite = unittest.defaultTestLoader.loadTestsFromName("test_fetch_page")
+    result = unittest.TextTestRunner(verbosity=1).run(suite)
+    if not result.wasSuccessful():
+        raise SystemExit(1)
 
 
 def validate_first(payload):
@@ -443,9 +376,27 @@ def take_page(payload, page, total_pages, seen):
     return list(records.values())
 
 
+def ca_bundle():
+    """Current certifi roots plus the emSign roots UVA SIS still chains through.
+
+    certifi 2026.10.18 dropped those roots. Without them the runner reports
+    a self-signed certificate in the SIS chain.
+    """
+    extra = os.path.join(os.path.dirname(__file__), "emsign-roots.pem")
+    folder = os.path.join(tempfile.gettempdir(), "tcf-data")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "cas.pem")
+    with open(certifi.where(), "rb") as base, open(extra, "rb") as more, open(path, "wb") as out:
+        out.write(base.read())
+        out.write(b"\n")
+        out.write(more.read())
+    return path
+
+
 def create_session():
     """Pooled session. urllib3 retries status 429 and 5xx up to five times."""
     session = requests.Session()
+    session.verify = ca_bundle()
     retry = Retry(
         total=MAX_RETRIES,
         backoff_factor=1,
