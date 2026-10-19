@@ -38,6 +38,7 @@ jobs:
           DESCRIPTIONS: ${{ inputs.descriptions }}
         run: |
           pip install requests
+          python -m unittest test_fetch_page.py
           args=()
           if [ "$DESCRIPTIONS" = "true" ]; then
             args+=(--descriptions)
