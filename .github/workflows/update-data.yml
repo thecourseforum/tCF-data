@@ -23,13 +23,18 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --no-dev --no-install-project
 
       - name: Fetch the SIS term
         id: fetch
@@ -37,8 +42,7 @@ jobs:
           TERM: ${{ inputs.term }}
           DESCRIPTIONS: ${{ inputs.descriptions }}
         run: |
-          pip install requests
-          python -m unittest test_fetch_page.py
+          uv run --no-sync python -m unittest test_fetch_page.py
           args=()
           if [ "$DESCRIPTIONS" = "true" ]; then
             args+=(--descriptions)
@@ -46,7 +50,7 @@ jobs:
           if [ -n "$TERM" ]; then
             args+=("$TERM")
           fi
-          python fetch_page.py "${args[@]}"
+          uv run --no-sync python fetch_page.py "${args[@]}"
 
       - name: Commit if the snapshot changed
         env:

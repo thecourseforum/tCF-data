@@ -16,7 +16,3 @@ The file uses the same columns as `load_semester` (mnemonic, number, instructors
 ## GitHub Action
 
 **Update course data** runs on the schedule in `.github/workflows/update-data.yml`, and when someone starts it from the Actions tab. The cron line runs once a day at 07:30 UTC. Edit that line to change the time. A scheduled run fetches the term for today's date and does not fetch descriptions. A manual run can pass a different term, and can turn on descriptions to refresh every catalog description. A blank result is left unchanged. The job commits `data/<year>_<season>.csv` only if the file changed.
-
-## What the website does with this file
-
-`fetch_data` in theCourseForum2 downloads `data/<year>_<season>.csv` from this repository. It does not call SIS. `load_semester` can import that CSV, including the description, discipline, and cost columns.
