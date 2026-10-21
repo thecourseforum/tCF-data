@@ -87,7 +87,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "certifi", specifier = ">=2024.0.0" },
+    { name = "certifi", specifier = ">=2026.10.19" },
     { name = "requests", specifier = ">=2.31.0,<3" },
 ]
 
