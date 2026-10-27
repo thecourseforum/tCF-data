@@ -3,7 +3,7 @@ name = "tcf-data"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "certifi>=2026.10.19",
+    "certifi>=2024.0.0",
     "requests>=2.31.0,<3",
 ]
 
