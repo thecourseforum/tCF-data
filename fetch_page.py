@@ -10,10 +10,8 @@ import csv
 import io
 import os
 import sys
-import tempfile
 from datetime import date
 
-import certifi
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -376,27 +374,9 @@ def take_page(payload, page, total_pages, seen):
     return list(records.values())
 
 
-def ca_bundle():
-    """Current certifi roots plus the emSign roots UVA SIS still chains through.
-
-    certifi 2026.10.18 dropped those roots. Without them the runner reports
-    a self-signed certificate in the SIS chain.
-    """
-    extra = os.path.join(os.path.dirname(__file__), "emsign-roots.pem")
-    folder = os.path.join(tempfile.gettempdir(), "tcf-data")
-    os.makedirs(folder, exist_ok=True)
-    path = os.path.join(folder, "cas.pem")
-    with open(certifi.where(), "rb") as base, open(extra, "rb") as more, open(path, "wb") as out:
-        out.write(base.read())
-        out.write(b"\n")
-        out.write(more.read())
-    return path
-
-
 def create_session():
     """Pooled session. urllib3 retries status 429 and 5xx up to five times."""
     session = requests.Session()
-    session.verify = ca_bundle()
     retry = Retry(
         total=MAX_RETRIES,
         backoff_factor=1,
