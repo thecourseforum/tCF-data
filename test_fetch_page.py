@@ -125,6 +125,13 @@ class DescriptionTests(unittest.TestCase):
         self.assertFalse(section.get("_description"))
 
 
+class TrustTests(unittest.TestCase):
+    def test_bundle_includes_the_emsign_root_uva_uses(self):
+        with open(fetch_page.ca_bundle(), encoding="utf-8") as bundle:
+            text = bundle.read()
+        self.assertIn("emSign Root CA - G1", text)
+
+
 class PageTests(unittest.TestCase):
     def test_first_page_count_must_match_its_classes(self):
         self.assertEqual(fetch_page.validate_first({"pageCount": 2, "classes": [{"class_nbr": 1}]}), 2)

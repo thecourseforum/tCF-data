@@ -55,7 +55,6 @@ jobs:
       - name: Commit if the snapshot changed
         env:
           TERM: ${{ steps.fetch.outputs.term }}
-          SEMESTER: ${{ steps.fetch.outputs.semester }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -63,7 +62,7 @@ jobs:
             echo "No changes."
           else
             git add data/
-            git commit -m "[Automated]: update ${SEMESTER} (term ${TERM})"
+            git commit -m "[Automated]: update ${TERM}"
             git pull --rebase origin "$GITHUB_REF_NAME"
             git push
           fi
